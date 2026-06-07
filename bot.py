@@ -1,108 +1,42 @@
-import os
+import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-import asyncio
+from aiogram.types import Message, CallbackQuery
 
-# ========== 1. НАСТРОЙКИ И ТВОИ ДАННЫЕ ==========
-# Твои настоящие данные (обязательно замени!)
-BOT_TOKEN = "8286121562:AAGoiSnMvDFms15mmxyFz6uCBZlyumeAoOo"
-ADMIN_ID = 1010873079  # ЗАМЕНИТЕ НА ВАШ ID (узнайте у @userinfobot)
+from config import BOT_TOKEN, ADMIN_ID, SELLER_TELEGRAM, SELLER_PHONE, SELLER_EMAIL, PRODUCTS
+from keyboards import main_kb, get_weight_keyboard
+from database import carts
+from states import temp_user_product
+from products import format_weight, calculate_price
 
-# Контакты продавца
-SELLER_TELEGRAM = "@твой_никнейм"
-SELLER_PHONE = "+7 999 123-45-67"
-SELLER_EMAIL = "freshberry@example.com"
-
-# Включаем логирование, чтобы легче было отлаживать
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Создаём бота и диспетчер
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ========== 2. ТОВАРЫ И ЦЕНЫ ==========
-# Ключ -> (Название, Цена за 1 кг)
-PRODUCTS = {
-    "strawberry": ("🍓 Клубника", 800),
-    "cherry": ("🍒 Вишня", 1200),
-    "sweet_cherry": ("🍒 Черешня", 1500),
-    "peach": ("🍑 Персик", 900),
-    "apricot": ("🍊 Абрикос", 700),
-}
-
-# Доступные веса в граммах
-WEIGHTS = [500, 1000, 1500, 2000]   # 500г, 1кг, 1.5кг, 2кг
-
-# Корзина: {user_id: [{"name":..., "weight":..., "price":...}]}
-carts = {}
-
-# Словарь для хранения временного состояния (для ручного ввода веса)
-temp_user_product = {}
-
-# ========== 3. КЛАВИАТУРЫ ==========
-# Главная reply-клавиатура (кнопки внизу)
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🍓 Клубника"), KeyboardButton(text="🍒 Вишня"), KeyboardButton(text="🍒 Черешня")],
-        [KeyboardButton(text="🍑 Персик"), KeyboardButton(text="🍊 Абрикос")],
-        [KeyboardButton(text="🛒 Корзина"), KeyboardButton(text="✅ Оформить заказ")],
-        [KeyboardButton(text="📞 Связаться с продавцом"), KeyboardButton(text="💰 Цены")]
-    ],
-    resize_keyboard=True  # Это делает кнопки удобного размера
-)
-
-def get_weight_keyboard(product_key: str) -> InlineKeyboardMarkup:
-    """Создаёт инлайн-клавиатуру для выбора веса"""
-    name, price_per_kg = PRODUCTS[product_key]
-    builder = InlineKeyboardBuilder()
-    
-    for w in WEIGHTS:
-        cost = int((w / 1000) * price_per_kg)
-        if w == 1000:
-            label = f"1 кг — {cost}₽"
-        elif w == 1500:
-            label = f"1.5 кг — {cost}₽"
-        elif w == 2000:
-            label = f"2 кг — {cost}₽"
-        else:
-            label = f"{w} г — {cost}₽"
-        builder.button(text=label, callback_data=f"{product_key}:{w}")
-    
-    # Кнопка для ручного ввода веса
-    builder.button(text="✏️ Свой вес", callback_data=f"custom:{product_key}")
-    # Кнопка "Назад" в главное меню
-    builder.button(text="🔙 Назад", callback_data="back")
-    
-    # Располагаем кнопки в один столбец
-    builder.adjust(1)
-    return builder.as_markup()
-
-# ========== 4. ОБРАБОТЧИКИ КОМАНД ==========
+# -------------------- СТАРТ --------------------
 @dp.message(Command("start"))
 async def start_command(message: Message):
     await message.answer(
         "🍓 <b>FreshBerry — свежие фрукты с доставкой!</b>\n\n"
-        "Выберите фрукт из меню ниже, а затем укажите вес.\n\n"
+        "Выберите фрукт из меню ниже, затем укажите вес.\n\n"
         "<b>💰 Цены за 1 кг:</b>\n"
         "🍓 Клубника — 800₽\n"
         "🍒 Вишня — 1200₽\n"
         "🍒 Черешня — 1500₽\n"
         "🍑 Персик — 900₽\n"
         "🍊 Абрикос — 700₽\n\n"
-        "<b>📦 Доступные веса:</b> 500г, 1кг, 1.5кг, 2кг\n"
-        "Также вы можете указать свой вес (от 100г до 5кг).\n\n"
-        "💸 <b>Оплата</b> — наличными при получении.",
+        "📦 Вес: 500г, 1кг, 1.5кг, 2кг или свой (100г–5кг).\n"
+        "💸 Оплата наличными при получении.",
         reply_markup=main_kb,
         parse_mode="HTML"
     )
 
-# ========== 5. ВЫБОР ФРУКТА ИЗ ГЛАВНОГО МЕНЮ ==========
-@dp.message(lambda message: message.text in ["🍓 Клубника", "🍒 Вишня", "🍒 Черешня", "🍑 Персик", "🍊 Абрикос"])
+# -------------------- ВЫБОР ФРУКТА --------------------
+@dp.message(lambda m: m.text in ["🍓 Клубника", "🍒 Вишня", "🍒 Черешня", "🍑 Персик", "🍊 Абрикос"])
 async def select_fruit(message: Message):
-    fruit_name = message.text
     mapping = {
         "🍓 Клубника": "strawberry",
         "🍒 Вишня": "cherry",
@@ -110,54 +44,44 @@ async def select_fruit(message: Message):
         "🍑 Персик": "peach",
         "🍊 Абрикос": "apricot",
     }
-    key = mapping[fruit_name]
+    key = mapping[message.text]
     name, price = PRODUCTS[key]
-    await message.answer(
-        f"{name} — {price}₽/кг\n\nВыберите вес:",
-        reply_markup=get_weight_keyboard(key)
-    )
+    await message.answer(f"{name} — {price}₽/кг\n\nВыберите вес:", reply_markup=get_weight_keyboard(key))
 
-# ========== 6. ОБРАБОТКА НАЖАТИЙ НА ИНЛАЙН-КНОПКИ ==========
+# -------------------- ИНЛАЙН-КНОПКИ (вес, свой вес, назад) --------------------
 @dp.callback_query()
 async def handle_callback(call: CallbackQuery):
     user_id = call.from_user.id
     data = call.data
 
-    # 6.1. Кнопка "Назад"
+    # Назад в главное меню
     if data == "back":
         await call.message.answer("Главное меню:", reply_markup=main_kb)
         await call.answer()
         return
 
-    # 6.2. Кнопка "Свой вес"
+    # Свой вес
     if data.startswith("custom:"):
         product_key = data.split(":")[1]
         temp_user_product[user_id] = product_key
         await call.message.answer(
             "✏️ <b>Введите свой вес:</b>\n\n"
-            "Напишите только число (можно в граммах или килограммах):\n"
-            "• <b>750</b> — 750 грамм\n"
-            "• <b>1.2</b> — 1.2 кг (1200 грамм)\n"
-            "• <b>2.5</b> — 2.5 кг\n\n"
-            "Минимум — 100 г, максимум — 5000 г (5 кг).",
+            "Напишите число в граммах или килограммах:\n"
+            "• 750 — 750 г\n• 1.2 — 1.2 кг\n• 2.5 — 2.5 кг\n\n"
+            "От 100 г до 5 кг.",
             parse_mode="HTML"
         )
         await call.answer()
         return
 
-    # 6.3. Обычный выбор веса (формат "strawberry:500")
+    # Обычный вес (формат "strawberry:500")
     if ":" in data:
         product_key, weight_str = data.split(":")
         weight = int(weight_str)
         name, price_per_kg = PRODUCTS[product_key]
-        cost = int((weight / 1000) * price_per_kg)
-        
-        if weight < 1000:
-            weight_text = f"{weight} г"
-        else:
-            weight_text = f"{weight // 1000} кг" if weight % 1000 == 0 else f"{weight / 1000:.1f} кг"
+        cost = calculate_price(product_key, weight)
+        weight_text = format_weight(weight)
 
-        # Добавляем товар в корзину
         if user_id not in carts:
             carts[user_id] = []
         carts[user_id].append({
@@ -167,35 +91,30 @@ async def handle_callback(call: CallbackQuery):
             "price": cost
         })
 
-        # Подсчитываем итоги
-        total_weight = sum(item["weight"] for item in carts[user_id])
-        total_price = sum(item["price"] for item in carts[user_id])
+        total_weight = sum(i["weight"] for i in carts[user_id])
+        total_price = sum(i["price"] for i in carts[user_id])
 
         await call.message.answer(
-            f"✅ <b>Добавлено в корзину!</b>\n\n"
-            f"{name} — {weight_text} — {cost}₽\n\n"
-            f"📦 <b>Ваша корзина:</b>\n"
-            f"• Общий вес: {total_weight} г ({total_weight/1000:.1f} кг)\n"
-            f"• Общая сумма: {total_price}₽\n\n"
-            f"Вы можете добавить ещё товары или перейти в «🛒 Корзину».",
+            f"✅ <b>Добавлено!</b>\n\n{name} — {weight_text} — {cost}₽\n\n"
+            f"📦 <b>Ваша корзина:</b>\n• Вес: {total_weight} г ({total_weight/1000:.1f} кг)\n• Сумма: {total_price}₽",
             reply_markup=main_kb,
             parse_mode="HTML"
         )
         await call.answer()
         return
 
-# ========== 7. РУЧНОЙ ВВОД ВЕСА ==========
+    await call.answer("Неизвестная команда")
+
+# -------------------- РУЧНОЙ ВВОД ВЕСА --------------------
 @dp.message()
 async def custom_weight_input(message: Message):
     user_id = message.from_user.id
     if user_id not in temp_user_product:
-        return  # Не ожидаем ввод веса от этого пользователя
-
+        return
     product_key = temp_user_product.pop(user_id)
-    text = message.text.strip().replace(",", ".")
 
+    text = message.text.strip().replace(",", ".")
     try:
-        # Парсим число (поддерживаем и граммы, и килограммы)
         if "кг" in text.lower():
             weight = int(float(text.lower().split("кг")[0]) * 1000)
         elif "г" in text.lower():
@@ -203,22 +122,17 @@ async def custom_weight_input(message: Message):
         else:
             weight = int(float(text) * 1000 if "." in text else int(text))
 
-        # Проверяем допустимые пределы
         if weight < 100:
-            await message.answer("❌ Минимальный вес — 100 грамм. Попробуйте ещё раз.")
+            await message.answer("❌ Минимум 100 грамм.")
             return
         if weight > 5000:
-            await message.answer("❌ Максимальный вес — 5000 грамм (5 кг). Попробуйте ещё раз.")
+            await message.answer("❌ Максимум 5000 грамм (5 кг).")
             return
 
-        name, price_per_kg = PRODUCTS[product_key]
-        cost = int((weight / 1000) * price_per_kg)
-        if weight < 1000:
-            weight_text = f"{weight} г"
-        else:
-            weight_text = f"{weight // 1000} кг" if weight % 1000 == 0 else f"{weight / 1000:.1f} кг"
+        name, _ = PRODUCTS[product_key]
+        cost = calculate_price(product_key, weight)
+        weight_text = format_weight(weight)
 
-        # Добавляем товар в корзину
         if user_id not in carts:
             carts[user_id] = []
         carts[user_id].append({
@@ -228,25 +142,24 @@ async def custom_weight_input(message: Message):
             "price": cost
         })
 
-        total_weight = sum(item["weight"] for item in carts[user_id])
-        total_price = sum(item["price"] for item in carts[user_id])
+        total_weight = sum(i["weight"] for i in carts[user_id])
+        total_price = sum(i["price"] for i in carts[user_id])
 
         await message.answer(
-            f"✅ <b>Добавлено в корзину!</b>\n\n"
-            f"{name} — {weight_text} — {cost}₽\n\n"
+            f"✅ <b>Добавлено!</b>\n\n{name} — {weight_text} — {cost}₽\n\n"
             f"📦 <b>В корзине:</b> {total_weight} г ({total_weight/1000:.1f} кг) на сумму {total_price}₽",
             reply_markup=main_kb,
             parse_mode="HTML"
         )
     except ValueError:
-        await message.answer("❌ Не удалось распознать вес. Пожалуйста, введите число (например, 750 или 1.5).")
+        await message.answer("❌ Не распознано. Напишите число, например: 750 или 1.2")
 
-# ========== 8. КОРЗИНА ==========
-@dp.message(lambda message: message.text == "🛒 Корзина")
+# -------------------- КОРЗИНА --------------------
+@dp.message(lambda m: m.text == "🛒 Корзина")
 async def show_cart(message: Message):
     user_id = message.from_user.id
     if user_id not in carts or not carts[user_id]:
-        await message.answer("🛒 Ваша корзина пуста. Выберите фрукты в главном меню.")
+        await message.answer("🛒 Корзина пуста. Выберите фрукты в главном меню.")
         return
 
     items = carts[user_id]
@@ -255,73 +168,68 @@ async def show_cart(message: Message):
         text += f"{i}. {item['name']} — {item['weight_text']} — {item['price']}₽\n"
     total_weight = sum(i["weight"] for i in items)
     total_price = sum(i["price"] for i in items)
-    text += f"\n📦 <b>Общий вес:</b> {total_weight} г ({total_weight/1000:.1f} кг)\n"
-    text += f"💰 <b>Итого:</b> {total_price}₽"
+    text += f"\n📦 <b>Общий вес:</b> {total_weight} г ({total_weight/1000:.1f} кг)\n💰 <b>Итого:</b> {total_price}₽"
     await message.answer(text, parse_mode="HTML")
 
-# ========== 9. ОФОРМЛЕНИЕ ЗАКАЗА ==========
-@dp.message(lambda message: message.text == "✅ Оформить заказ")
+# -------------------- ОФОРМЛЕНИЕ ЗАКАЗА --------------------
+@dp.message(lambda m: m.text == "✅ Оформить заказ")
 async def checkout(message: Message):
     user_id = message.from_user.id
     if user_id not in carts or not carts[user_id]:
-        await message.answer("❌ Корзина пуста. Добавьте товары перед оформлением заказа.")
+        await message.answer("❌ Корзина пуста. Добавьте товары.")
         return
 
     username = message.from_user.username or "нет"
     name = message.from_user.full_name
     items = carts[user_id]
 
-    items_text = "\n".join(f"{item['name']} — {item['weight_text']} — {item['price']}₽" for item in items)
-    total_weight = sum(item["weight"] for item in items)
-    total_price = sum(item["price"] for item in items)
+    items_text = "\n".join(f"{i['name']} — {i['weight_text']} — {i['price']}₽" for i in items)
+    total_weight = sum(i["weight"] for i in items)
+    total_price = sum(i["price"] for i in items)
 
-    order_msg = (
+    order = (
         f"🆕 <b>НОВЫЙ ЗАКАЗ!</b>\n\n"
-        f"👤 Покупатель: {name} (@{username})\n"
-        f"🆔 ID: {user_id}\n\n"
-        f"📦 <b>Состав заказа:</b>\n{items_text}\n\n"
-        f"⚖️ Общий вес: {total_weight} г ({total_weight/1000:.1f} кг)\n"
-        f"💰 <b>Сумма к оплате:</b> {total_price}₽\n"
-        f"💸 Оплата: наличными при получении."
+        f"👤 {name} (@{username})\n🆔 {user_id}\n\n"
+        f"📦 <b>Состав:</b>\n{items_text}\n\n"
+        f"⚖️ Вес: {total_weight} г ({total_weight/1000:.1f} кг)\n💰 Сумма: {total_price}₽\n"
+        f"💸 Оплата наличными при получении."
     )
     try:
-        await bot.send_message(ADMIN_ID, order_msg, parse_mode="HTML")
+        await bot.send_message(ADMIN_ID, order, parse_mode="HTML")
         await message.answer(
-            "✅ <b>Заказ успешно отправлен!</b>\n\n"
-            "Спасибо! Продавец свяжется с вами в ближайшее время для подтверждения.\n\n"
-            "Если у вас остались вопросы, нажмите «📞 Связаться с продавцом».",
+            "✅ <b>Заказ отправлен!</b>\n\nПродавец свяжется с вами.\n"
+            "Если есть вопросы — нажмите «📞 Связаться с продавцом».",
             parse_mode="HTML"
         )
-        carts[user_id] = []  # Очищаем корзину после оформления заказа
+        carts[user_id] = []
     except Exception as e:
-        await message.answer("❌ Произошла ошибка при отправке заказа. Пожалуйста, попробуйте позже.")
-        logging.error(f"Ошибка при отправке заказа: {e}")
+        await message.answer("❌ Ошибка при отправке заказа.")
+        logging.error(e)
 
-# ========== 10. СВЯЗАТЬСЯ С ПРОДАВЦОМ ==========
-@dp.message(lambda message: message.text == "📞 Связаться с продавцом")
-async def contact_seller(message: Message):
+# -------------------- СВЯЗАТЬСЯ С ПРОДАВЦОМ --------------------
+@dp.message(lambda m: m.text == "📞 Связаться с продавцом")
+async def contact(message: Message):
     await message.answer(
         f"📞 <b>Связаться с нами</b>\n\n"
-        f"• <b>Telegram:</b> {SELLER_TELEGRAM}\n"
-        f"• <b>Телефон / WhatsApp:</b> {SELLER_PHONE}\n"
-        f"• <b>Email:</b> {SELLER_EMAIL}\n\n"
-        f"Мы работаем с 9:00 до 21:00. Напишите или позвоните — ответим быстро! 🍓",
+        f"• Telegram: {SELLER_TELEGRAM}\n"
+        f"• Телефон: {SELLER_PHONE}\n"
+        f"• Email: {SELLER_EMAIL}\n\n"
+        f"Работаем с 9:00 до 21:00.",
         parse_mode="HTML"
     )
 
-# ========== 11. ПОКАЗАТЬ ЦЕНЫ ==========
-@dp.message(lambda message: message.text == "💰 Цены")
-async def show_prices(message: Message):
-    text = "💰 <b>Прайс-лист (за 1 кг)</b>\n\n"
+# -------------------- ПОКАЗАТЬ ЦЕНЫ --------------------
+@dp.message(lambda m: m.text == "💰 Цены")
+async def prices(message: Message):
+    text = "💰 <b>Цены за 1 кг:</b>\n\n"
     for name, price in PRODUCTS.values():
         text += f"{name} — {price}₽\n"
-    text += "\n📦 <b>Доступные веса:</b> 500г, 1кг, 1.5кг, 2кг (или введите свой — от 100г до 5кг).\n"
-    text += "💸 Оплата наличными при получении."
+    text += "\n📦 Веса: 500г, 1кг, 1.5кг, 2кг или свой (100г–5кг).\n💸 Оплата наличными."
     await message.answer(text, parse_mode="HTML")
 
-# ========== 12. ЗАПУСК БОТА ==========
+# -------------------- ЗАПУСК --------------------
 async def main():
-    logging.info("🍓 Бот FreshBerry запущен и готов к работе!")
+    logging.info("🍓 FreshBerry запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
